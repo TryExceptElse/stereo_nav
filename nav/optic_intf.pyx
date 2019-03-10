@@ -58,19 +58,21 @@ cdef extern from 'clib/optic_intf.h':
         optic_stereo_handle_t **handle,
         void (*cb)(optic_cb_data_t data),
         void *cb_data
-    )
+    ) nogil
 
-    void optic_close_handle(optic_stereo_handle_t *handle)
+    void optic_close_handle(optic_stereo_handle_t *handle) nogil
 
-    optic_status optic_handle_start_streaming(optic_stereo_handle_t *handle)
+    optic_status optic_handle_start_streaming(
+        optic_stereo_handle_t *handle
+    ) nogil
 
-    bint optic_handle_stop_streaming(optic_stereo_handle_t *handle)
+    bint optic_handle_stop_streaming(optic_stereo_handle_t *handle) nogil
 
     void optic_sprint_status(
         char *buf,
         uint16_t n,
         optic_status status
-    )
+    ) nogil
 
 
 #######################################################################
