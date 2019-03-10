@@ -112,7 +112,7 @@ cdef struct frame_data_t:
     uvc_error err
 
 
-cdef void optic_callback(optic_cb_data_t data):
+cdef void optic_callback(optic_cb_data_t data) nogil:
     """
     This function is called by the optic interface when a frame is
     received from either sensor.
@@ -120,6 +120,16 @@ cdef void optic_callback(optic_cb_data_t data):
     This function is intended to be run in the uvc thread, and so
     simply translates the received frame to our desired format, and
     pushes it into the frame pipe.
+
+    Since this function is run as part of a callback from c, exceptions
+    are not thrown in this function. Instead, the err field of the
+    frame_data struct may be set, indicating that something unexpected
+    has occurred.
+
+    In order to allow execution across multiple threads, this function
+    does not use the gil.
+
+    :return None
     """
     cdef internal_cb_data_t *internal_cb_data = \
         <internal_cb_data_t *>data.cb_data
@@ -159,7 +169,7 @@ cdef class StereoHandle:
         internal_cb_data_t      internal_cb_data
 
     # If someday multiple stereo handles need to be controlled,
-    # they should be added as arguments to __init__.
+    # uvc_context should be added as argument to __init__.
 
 
     def __cinit__(self, cb) -> None:

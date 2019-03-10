@@ -57,15 +57,15 @@ cdef extern from 'libuvc/libuvc.h':
     uvc_error uvc_init(
         uvc_context **context,
         libusb_context *usb_context
-    )
+    ) nogil
 
-    uvc_error uvc_exit(uvc_context *context)
+    uvc_error uvc_exit(uvc_context *context) nogil
 
-    uvc_frame* uvc_allocate_frame(size_t size)
-    void uvc_free_frame(uvc_frame *frame)
+    uvc_frame* uvc_allocate_frame(size_t size) nogil
+    void uvc_free_frame(uvc_frame *frame) nogil
 
-    uvc_error uvc_any2rgb(uvc_frame *in_frame, uvc_frame *out_frame)
+    uvc_error uvc_any2rgb(uvc_frame *in_frame, uvc_frame *out_frame) nogil
 
-    void uvc_perror(uvc_error err, const char *msg)
+    void uvc_perror(uvc_error err, const char *msg) nogil
 
-    const char* uvc_strerror(uvc_error err)
+    const char* uvc_strerror(uvc_error err) nogil
