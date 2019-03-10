@@ -186,12 +186,12 @@ cdef class StereoHandle:
         uvc_check(uvc.uvc_init(&self.uvc_context, NULL))
 
         # Open stereo device handle
-        optic_open_handle(
+        optic_check(optic_open_handle(
             self.uvc_context,
             &self.handle,
             optic_callback,
             &self.internal_cb_data
-        )
+        ))
 
         # Set up frame pipe
         self.frame_pipe = pipe_new(sizeof(frame_data_t*), PIPE_SIZE)
