@@ -5,13 +5,15 @@ This module handles generation of numpy arrays from the stereo device.
 
 cimport cython
 cimport uvc
-from libc.stdint cimport uint8_t, uint16_t
+from libc.stdlib cimport malloc, free
+from libc.stdint cimport uint8_t, uint16_t, uint32_t
 import numpy as np
 cimport numpy as np
 
 import time
 
-cimport uvc
+from pipe cimport *  # pipe types + functions are pipe_ prefixed.
+from uvc cimport *  # uvc types + functions are uvc_ prefixed.
 
 
 #######################################################################
@@ -39,19 +41,20 @@ cdef extern from 'clib/optic_intf.h':
 
     cdef struct optic_cb_data_t:
         optic_side side
-        uvc.uvc_frame_t *frame
+        uvc.uvc_frame *frame
         void *cb_data
 
     # Extern vars
 
     const uint16_t kOpticWidth  # Stream width
     const uint16_t kOpticHeight  # Stream height
+    const uint32_t kOpticFrameSize  # Frame size in bytes.
     const uint16_t kOpticFps
 
     # Optic Functions
 
     optic_status optic_open_handle(
-        uvc.uvc_context_t *ctx,
+        uvc.uvc_context *ctx,
         optic_stereo_handle_t **handle,
         void (*cb)(optic_cb_data_t data),
         void *cb_data
@@ -74,32 +77,70 @@ cdef extern from 'clib/optic_intf.h':
 
 
 cdef double MAX_SYNC_DIFF = 1 / 60  # Half of a frame duration.
+cdef int PIPE_SIZE = 30
 
 
-class OpticDeviceException(Exception):
+class StatusException(Exception):
+    """
+    Base class for exceptions storing a status or error code.
+    """
+    def __init__(self, code: int, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.code = code
+
+
+class OpticDeviceException(StatusException):
     """
     Python Exception thrown when a UVC error occurs.
     """
 
-cdef struct received_frames_t:
-    pass  # TODO
+
+class UvcError(StatusException):
+    """
+    Python Exception wrapping a uvc_error_t
+    """
+
+
+cdef struct internal_cb_data_t:
+    pipe_producer_t *left_producer
+    pipe_producer_t *right_producer
+
+
+cdef struct frame_data_t:
+    uvc_frame *frame
+    optic_side side
+    uvc_error err
 
 
 cdef void optic_callback(optic_cb_data_t data):
     """
     This function is called by the optic interface when a frame is
     received from either sensor.
+
+    This function is intended to be run in the uvc thread, and so
+    simply translates the received frame to our desired format, and
+    pushes it into the frame pipe.
     """
-    cdef received_frames_t *received_frames = <received_frames_t *>data.cb_data
+    cdef internal_cb_data_t *internal_cb_data = \
+        <internal_cb_data_t *>data.cb_data
+    cdef frame_data_t *frame_data = \
+        <frame_data_t *>malloc(sizeof(frame_data_t))
+
+    frame_data.frame = NULL
+    frame_data.frame = uvc_allocate_frame(kOpticFrameSize)
+    frame_data.side = data.side
+
+    # Translate data to new frame
+    frame_data.err = uvc_any2rgb(data.frame, frame_data.frame)
+    if frame_data.err:
+        uvc_free_frame(frame_data.frame)
+        frame_data.frame = NULL
+
+    # Push frame data into pipe.
     if data.side == kOpticLeft:
-        pass # TODO
-
-    if data.side == kOpticRight:
-        pass # TODO
-
-
-cdef void store_frame_in_arr(uvc.uvc_frame_t *frame, uint8_t *arr) nogil:
-    pass  # TODO
+        pipe_push(internal_cb_data.left_producer, frame_data, 1)
+    elif data.side == kOpticRight:
+        pipe_push(internal_cb_data.right_producer, frame_data, 1)
 
 
 @cython.final
@@ -108,11 +149,14 @@ cdef class StereoHandle:
     Class handling Input from a stereo camera device.
     """
 
-    cdef optic_stereo_handle_t *handle
-    cdef optic_cb_data_t cb_data
-    cdef uvc.uvc_context_t *uvc_context
-    cdef object cb
-    cdef received_frames_t received_frames
+    cdef:
+        optic_stereo_handle_t   *handle
+        optic_cb_data_t         cb_data
+        uvc_context             *uvc_context
+        object                  cb
+        pipe_t                  *frame_pipe
+        pipe_consumer_t         *frame_consumer
+        internal_cb_data_t      internal_cb_data
 
     # If someday multiple stereo handles need to be controlled,
     # they should be added as arguments to __init__.
@@ -134,14 +178,84 @@ cdef class StereoHandle:
             self.uvc_context,
             &self.handle,
             optic_callback,
-            &self.received_frames
+            &self.internal_cb_data
         )
+
+        # Set up frame pipe
+        self.frame_pipe = pipe_new(sizeof(frame_data_t*), PIPE_SIZE)
+        self.internal_cb_data.left_producer = \
+            pipe_producer_new(self.frame_pipe)
+        self.internal_cb_data.right_producer = \
+            pipe_producer_new(self.frame_pipe)
+        self.frame_consumer = pipe_consumer_new(self.frame_pipe)
 
     def __dealloc__(self):
         optic_close_handle(self.handle)
+        pipe_free(self.frame_pipe)
+        pipe_producer_free(self.internal_cb_data.left_producer)
+        pipe_producer_free(self.internal_cb_data.right_producer)
+        pipe_consumer_free(self.frame_consumer)
 
 
-cdef inline int uvc_check(uvc.uvc_error err) except -1:
+@cython.final
+cdef class Frame:
+    """
+    Class wrapping stored data for a single camera's frame.
+    """
+    cdef frame_data_t *frame_data
+
+    def __cinit__(self) -> None:
+        self.frame_data = NULL
+
+    def __dealloc__(self) -> None:
+        if self.frame_data != NULL:
+            free(self.frame_data)
+
+    cdef void set_data(self, frame_data_t *data):
+        self.frame_data = data
+        cdef uint8_t *arr_data = <uint8_t*>data.frame.data
+
+    @property
+    def arr(self) -> np.ndarray:
+        if self.frame_data == NULL:
+            raise ValueError('Frame has not had any data set.')
+        cdef uint8_t *arr_data = <uint8_t *>self.frame_data.frame.data
+        cdef np.ndarray[np.uint8_t, ndim=1] np_arr = \
+            np.PyArray_SimpleNewFromData(
+                1, [kOpticFrameSize], np.NPY_UINT8, arr_data)
+        return np_arr
+
+    @property
+    def timestamp(self) -> float:
+        if self.frame_data == NULL:
+            raise ValueError('Frame has not had any data set.')
+        return self.frame_data.frame.capture_time.tv_usec
+
+    @property
+    def side(self) -> str:
+        if self.frame_data == NULL:
+            raise ValueError('Frame has not had any data set.')
+        if self.frame_data.side == kOpticLeft:
+            return 'left'
+        elif self.frame_data.side == kOpticRight:
+            return 'right'
+        raise ValueError(f'Unexpected value: {self.frame_data.side}')
+
+
+@cython.final
+cdef class StereoPair:
+    """
+    Class wrapping a pair of frames, one from each camera, at a single
+    point in time.
+    """
+    cdef public Frame left, right
+
+    def __init__(self, left: 'Frame', right: 'Frame') -> None:
+        self.left = left
+        self.right = right
+
+
+cdef inline int uvc_check(uvc_error err) except -1:
     """
     Checks passed uvc_error value, and if it is an error, raises a
     Python OpticDeviceException with the appropriate message.
@@ -149,7 +263,8 @@ cdef inline int uvc_check(uvc.uvc_error err) except -1:
     :raises OpticDeviceException if uvc_error is not UVC_SUCCESS.
     """
     if err:
-        raise OpticDeviceException(uvc.uvc_strerror(err))
+        raise UvcError(err, uvc_strerror(err))
+    return 0
 
 
 cdef int optic_check(optic_status status) except -1:
@@ -160,7 +275,7 @@ cdef int optic_check(optic_status status) except -1:
     :raises OpticDeviceException if status is not OK.
     """
     if status:
-        raise OpticDeviceException({
+        raise OpticDeviceException(status, {
             kOpticDeviceNotFound: "Device not found.",
             kOpticPermissionError: "Lacking permission to access device.",
             kOpticDeviceOpenError: "Unable to open device.",

@@ -23,9 +23,9 @@ typedef enum optic_status {
 
 typedef enum optic_side {kOpticLeft, kOpticRight} optic_side;
 
-typedef struct optic_stereo_handle optic_stereo_handle_t;
+typedef struct optic_stereo_handle_t optic_stereo_handle_t;
 
-typedef struct optic_cb_data {
+typedef struct optic_cb_data_t {
     enum optic_side side;
     uvc_frame_t *frame;
     void *cb_data;
@@ -35,6 +35,7 @@ typedef struct optic_cb_data {
 
 extern const uint16_t kOpticWidth;  // Stream width
 extern const uint16_t kOpticHeight;  // Stream height
+extern const uint32_t kOpticFrameSize;  // Frame data size in bytes.
 extern const uint16_t kOpticFps;
 
 // --------------------------------------------------------------------

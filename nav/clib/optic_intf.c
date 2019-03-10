@@ -25,6 +25,7 @@ static const uint32_t kLeftId = 39169;  // Product id of left sensor.
 static const uint32_t kRightId = 39170;  // Product id of right sensor.
 const uint16_t kOpticWidth = 640;  // Stream width
 const uint16_t kOpticHeight = 480;  // Stream height
+const uint32_t kOpticFrameSize = kOpticWidth * kOpticHeight * 3;
 const uint16_t kOpticFps = 30;
 
 // --------------------------------------------------------------------
@@ -34,7 +35,7 @@ typedef struct optic_cb_wrapper {
     optic_cb_data_t cb_data;
 } optic_cb_wrapper_t;
 
-struct optic_stereo_handle {
+struct optic_stereo_handle_t {
     uvc_device_t *left;
     uvc_device_t *right;
     uvc_device_handle_t *left_handle;
