@@ -56,12 +56,12 @@ optic_print_uvc_devices     (uvc_context_t *ctx);
 
 static optic_status     
 optic_find_devices          (uvc_context_t *ctx, 
-                             uvc_device_t *left, 
-                             uvc_device_t *right);
+                             uvc_device_t **left,
+                             uvc_device_t **right);
 
 static optic_status
 optic_set_up_sensor         (uvc_device_t *device, 
-                             uvc_device_handle_t *handle,
+                             uvc_device_handle_t **handle,
                              uvc_stream_ctrl_t *ctrl);
 
 static void optic_cb        (uvc_frame_t *frame, void *data);
@@ -190,8 +190,6 @@ enum optic_status optic_open_handle(
         optic_stereo_handle_t **handle,
         void (*cb)(optic_cb_data_t data),
         void *cb_data) {
-    // Display what devices are connected.
-    optic_print_uvc_devices(ctx);
 
     // Allocate optic handle.
     *handle = (optic_stereo_handle_t *) malloc(sizeof(optic_stereo_handle_t));
@@ -215,10 +213,13 @@ enum optic_status optic_open_handle(
     // Set up cb data
     (*handle)->left_cb_wrapper.cb_data.side = kOpticLeft;
     (*handle)->right_cb_wrapper.cb_data.side = kOpticRight;
+
+    (*handle)->left_is_streaming = false;
+    (*handle)->right_is_streaming = false;
     
     // Find devices.
 
-    if (optic_find_devices(ctx, (*handle)->left, (*handle)->right)) {
+    if (optic_find_devices(ctx, &(*handle)->left, &(*handle)->right)) {
         optic_close_handle(*handle);
         return kOpticDeviceOpenError;
     }
@@ -227,13 +228,13 @@ enum optic_status optic_open_handle(
     optic_status status;
     status = optic_set_up_sensor(
             (*handle)->left, 
-            (*handle)->left_handle,
+            &(*handle)->left_handle,
             &(*handle)->left_ctrl
     );
     if (status) return status;
     status = optic_set_up_sensor(
             (*handle)->right, 
-            (*handle)->right_handle,
+            &(*handle)->right_handle,
             &(*handle)->right_ctrl
     );
     if (status) return status;
@@ -270,13 +271,13 @@ optic_status optic_handle_start_streaming(optic_stereo_handle_t *handle) {
     }
     
     uvc_error_t res;
-    
+
     // Begin left stream.
     res = uvc_start_streaming(
-            handle->right_handle, 
-            &handle->right_ctrl, 
+            handle->left_handle,
+            &handle->left_ctrl,
             optic_cb,
-            (void *)&handle->left_cb_wrapper, 
+            (void *)&handle->left_cb_wrapper,
             0
     );
     if (res < 0) {
@@ -287,23 +288,23 @@ optic_status optic_handle_start_streaming(optic_stereo_handle_t *handle) {
         uvc_set_ae_mode(handle->left_handle, 1); // turn on auto exposure.
         handle->left_is_streaming = true;
     }
-    
-    // Begin right stream.
-    res = uvc_start_streaming(
-            handle->right_handle, 
-            &handle->right_ctrl, 
-            optic_cb, 
-            (void *)&handle->right_cb_wrapper, 
-            0
-    );
-    if (res < 0) {
-        puts("Unable to begin left stream.");
-        uvc_perror(res, "uvc_start_streaming");
-        return kOpticStreamStartError;
-    } else {
-        uvc_set_ae_mode(handle->right_handle, 1); // turn on auto exposure.
-        handle->right_is_streaming = true;
-    }
+
+//    // Begin right stream.
+//    res = uvc_start_streaming(
+//            handle->right_handle,
+//            &handle->right_ctrl,
+//            optic_cb,
+//            (void *)&handle->right_cb_wrapper,
+//            0
+//    );
+//    if (res < 0) {
+//        puts("Unable to begin right stream.");
+//        uvc_perror(res, "uvc_start_streaming");
+//        return kOpticStreamStartError;
+//    } else {
+//        uvc_set_ae_mode(handle->right_handle, 1); // turn on auto exposure.
+//        handle->right_is_streaming = true;
+//    }
     return kOpticOk;
 }
 
@@ -325,7 +326,7 @@ bool optic_handle_stop_streaming(optic_stereo_handle_t *handle) {
 // --------------------------------------------------------------------
 
 static optic_status optic_find_devices(
-        uvc_context_t *ctx, uvc_device_t *left, uvc_device_t *right) {
+        uvc_context_t *ctx, uvc_device_t **left, uvc_device_t **right) {
     uvc_error_t res;
   
     // Display list of connected devices.
@@ -333,7 +334,7 @@ static optic_status optic_find_devices(
     // Find left + right devices.
     res = uvc_find_device(
         ctx, 
-        &left,
+        left,
         0,  // vendor_id
         kLeftId,  // product id
         NULL  // serial num
@@ -345,7 +346,7 @@ static optic_status optic_find_devices(
     }
     res = uvc_find_device(
         ctx, 
-        &right,
+        right,
         0,  // vendor_id
         kRightId,  // product id
         NULL  // serial num
@@ -360,18 +361,18 @@ static optic_status optic_find_devices(
 
 static optic_status optic_set_up_sensor(
     uvc_device_t *device, 
-    uvc_device_handle_t *handle,
+    uvc_device_handle_t **handle,
     uvc_stream_ctrl_t *ctrl
 ) {
     uvc_error_t res;
-    res = uvc_open(device, &handle);
+    res = uvc_open(device, handle);
     if (res < 0) {
         puts("Unable to open sensor handle");
         uvc_perror(res, "uvc_open"); /* unable to open device */
         return kOpticDeviceOpenError;
     }
     res = uvc_get_stream_ctrl_format_size(
-        handle, ctrl, /* result stored in ctrl */
+        *handle, ctrl, /* result stored in ctrl */
         UVC_FRAME_FORMAT_YUYV, /* YUV 422, aka YUV 4:2:2. try _COMPRESSED */
         kOpticWidth, kOpticHeight, kOpticFps /* width, height, fps */
     );

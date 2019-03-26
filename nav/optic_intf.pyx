@@ -4,16 +4,13 @@ This module handles generation of numpy arrays from the stereo device.
 """
 
 cimport cython
-cimport uvc
 from libc.stdlib cimport malloc, free
 from libc.stdint cimport uint8_t, uint16_t, uint32_t
 import numpy as np
 cimport numpy as np
 
-import time
-
-from pipe cimport *  # pipe types + functions are pipe_ prefixed.
-from uvc cimport *  # uvc types + functions are uvc_ prefixed.
+from nav.pipe cimport *  # pipe types + functions are pipe_ prefixed.
+from nav.uvc cimport *  # uvc types + functions are uvc_ prefixed.
 
 
 #######################################################################
@@ -41,7 +38,7 @@ cdef extern from 'clib/optic_intf.h':
 
     cdef struct optic_cb_data_t:
         optic_side side
-        uvc.uvc_frame *frame
+        uvc_frame *frame
         void *cb_data
 
     # Extern vars
@@ -54,7 +51,7 @@ cdef extern from 'clib/optic_intf.h':
     # Optic Functions
 
     optic_status optic_open_handle(
-        uvc.uvc_context *ctx,
+        uvc_context *ctx,
         optic_stereo_handle_t **handle,
         void (*cb)(optic_cb_data_t data),
         void *cb_data
@@ -86,8 +83,8 @@ class StatusException(Exception):
     """
     Base class for exceptions storing a status or error code.
     """
-    def __init__(self, code: int, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, code: int, *args) -> None:
+        super().__init__(*args)
         self.code = code
 
 
@@ -131,6 +128,7 @@ cdef void optic_callback(optic_cb_data_t data) nogil:
     In order to allow execution across multiple threads, this function
     does not use the gil.
 
+    :param data: optic_cb_data_t
     :return None
     """
     cdef internal_cb_data_t *internal_cb_data = \
@@ -169,6 +167,7 @@ cdef class StereoHandle:
         pipe_t                  *frame_pipe
         pipe_consumer_t         *frame_consumer
         internal_cb_data_t      internal_cb_data
+        public bint             streaming
 
     # If someday multiple stereo handles need to be controlled,
     # uvc_context should be added as argument to __init__.
@@ -181,9 +180,10 @@ cdef class StereoHandle:
                     produced by the stereo sensors.
         """
         self.cb = cb
+        self.streaming = False
 
         # Open UVC Context
-        uvc_check(uvc.uvc_init(&self.uvc_context, NULL))
+        uvc_check(uvc_init(&self.uvc_context, NULL))
 
         # Open stereo device handle
         optic_check(optic_open_handle(
@@ -202,11 +202,69 @@ cdef class StereoHandle:
         self.frame_consumer = pipe_consumer_new(self.frame_pipe)
 
     def __dealloc__(self):
+        if self.streaming:
+            self.stop()
         optic_close_handle(self.handle)
+        if not self.frame_pipe:
+            return
         pipe_free(self.frame_pipe)
         pipe_producer_free(self.internal_cb_data.left_producer)
         pipe_producer_free(self.internal_cb_data.right_producer)
         pipe_consumer_free(self.frame_consumer)
+
+    cpdef int start(self) except -1:
+        """
+        Begin streaming from device.
+        """
+        optic_check(optic_handle_start_streaming(self.handle))
+        self.streaming = True
+
+    cpdef void stop(self):
+        optic_handle_stop_streaming(self.handle)
+        self.streaming = False
+
+    cpdef Frame read_frame(self):
+        """
+        Read a single frame from the pipe.
+
+        This method will block until a Frame is available.
+
+        :return Frame
+        """
+        # Read a single frame data pointer from the pipe.
+        cdef frame_data_t *frame_data
+        cdef size_t read = pipe_pop(self.frame_consumer, &frame_data, 1)
+
+        if read == 0:
+            raise ValueError('Failed to read frame from pipe.')
+
+        # Create wrapper object
+        cdef Frame frame = Frame()
+        frame.set_data(frame_data)
+
+        return frame
+
+    cpdef StereoPair read_pair(self):
+        """
+        Read a synchronized stereo frame pair from the pipe.
+
+        This method will block until a StereoPair is available.
+
+        :return StereoPair
+        """
+        cdef Frame left = None, right = None
+        while (
+                not (left and right) or
+                abs(left.time_difference(right)) > MAX_SYNC_DIFF
+        ):
+            frame: Frame = self.read_frame()
+            if frame.side == 'left':
+                left = frame
+            elif frame.side == 'right':
+                right = frame
+            else:
+                assert False
+        return StereoPair(left, right)
 
 
 @cython.final
@@ -225,7 +283,9 @@ cdef class Frame:
 
     cdef void set_data(self, frame_data_t *data):
         self.frame_data = data
-        cdef uint8_t *arr_data = <uint8_t*>data.frame.data
+
+    cpdef double time_difference(self, Frame other):
+        return (self.timestamp - other.timestamp) / 1e6
 
     @property
     def arr(self) -> np.ndarray:
@@ -265,6 +325,15 @@ cdef class StereoPair:
     def __init__(self, left: 'Frame', right: 'Frame') -> None:
         self.left = left
         self.right = right
+
+    @property
+    def time_difference(self) -> float:
+        """
+        Gets the time difference between the left and right frames of
+        the StereoPair
+        :return float
+        """
+        return self.left.time_difference(self.right)
 
 
 cdef inline int uvc_check(uvc_error err) except -1:
